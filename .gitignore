@@ -1,0 +1,6 @@
+# Editors.
+.vscode
+.history
+test_data/
+
+# Build directory.
