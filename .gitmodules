@@ -1,3 +1,0 @@
-[submodule "third_party/htslib"]
-	path = third_party/htslib
-	url = https://github.com/samtools/htslib.git
