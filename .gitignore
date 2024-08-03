@@ -2,5 +2,7 @@
 .vscode
 .history
 test_data/
+bin/
+obj/
 
 # Build directory.
