@@ -10,3 +10,9 @@
 #include <string>
 #include <cstddef>
 
+
+
+const float min_float = std::numeric_limits<float>::lowest();
+const float max_float = std::numeric_limits<float>::max();
+
+

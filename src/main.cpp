@@ -1,78 +1,101 @@
 
-#include "compress.h"
-#include "decompress.h"
+#include "compressor.h"
+#include "decompressor.h"
 #include "argumentParser.h"
 
 #include <iostream>
 
-int usage(){
+#include <chrono>
+#include <time.h>
+using namespace std::chrono;
 
-    std::cerr << "Usage: gsc [option] [arguments] " << std::endl;
-    std::cerr << "Available options: " << std::endl;
-    std::cerr << "\tcompress - compress VCF/BCF file" << std::endl;
-    std::cerr << "\tdecompress - query and decompress to VCF/BCF file " << std::endl;
-    
-    exit(0);
+int params_options(int argc, const char *argv[], argumentParser &parser);
+int compress_entry(argumentParser &parser);
+int decompress_entry(argumentParser &parser);
+
+int main(int argc, const char *argv[])
+{
+
+    auto start = high_resolution_clock::now();
+
+    int result = 0;
+    argumentParser parser;
+
+    std::cout << parser.params.compression_level << std::endl;
+
+    if (!params_options(argc, argv, parser))
+        return 1;
+
+    if (parser.params.task_mode == task_mode_t::mcompress)
+    {
+        result = compress_entry(parser);
+        if (result)
+            std::cerr << "Compression error!!!\n";
+    }
+    else if (parser.params.task_mode == task_mode_t::mdecompress)
+    {
+        result = decompress_entry(parser);
+        if (result)
+            std::cerr << " Decompression error!!!\n";
+    }
+
+    auto end = high_resolution_clock::now();
+    double time_duration = duration<double>(end - start).count();
+
+    std::cerr << "Total processing time: " << time_duration << " seconds.\n";
+
+    return result;
 }
 
-int usage_compress(){
+int params_options(int argc, const char *argv[], argumentParser &parser)
+{
 
-    std::cerr << "Usage of gsc compress:\n\n"
-                << "\tgsc compress [options] [--in [in_file]] [--out [out_file]]\n\n"
-                << "Where:\n\n"
-                << "\t[options]              Optional flags and parameters for compression.\n"
-                << "\t-i,  --in [in_file]    Specify the input file (default: VCF or VCF.GZ). If omitted, input is taken from standard input (stdin).\n"
-                << "\t-o,  --out [out_file]  Specify the output file. If omitted, output is sent to standard output (stdout).\n\n"
-                
-                << "Options:\n\n"
-                << "\t-M,  --mode_lossy      Choose lossy compression mode (lossless by default).\n"
-                << "\t-b,  --bcf             Input is a BCF file (default: VCF or VCF.GZ).\n"
-                << "\t-p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).\n"
-                << "\t-t,  --threads [X]     Set number of threads to [X] (default: 1).\n"
-                << "\t-d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).\n"
-                << "\t-m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.\n"
-                << std::endl;
+    if (argc < 2)
+    {
+        return parser.usage();
+    }
+    if (!parser.parse_mode_option(argv[1]))
+    {
+        return parser.usage();
+    }
 
-    exit(0);
-    
+    bool parse_success = false;
+    if (parser.params.task_mode == task_mode_t::mcompress)
+    {
+        parse_success = parser.parse_compress_options(argc, argv);
+    }
+    else if (parser.params.task_mode == task_mode_t::mdecompress)
+    {
+        parse_success = parser.parse_decompress_options(argc, argv);
+    }
+
+    return parse_success && parser.validate_inputs() ? 1 : parser.usage();
 }
 
-int usage_decompress(){
+int compress_entry(argumentParser &parser)
+{
 
-std::cerr << "Usage of gsc decompress and query:\n\n"
-          << "\tgsc decompress [options] --in [in_file] --out [out_file]\n\n"
+    Compressor compressor(parser.params); // Passing compression parameters.
+    if (!compressor.CompressProcess())
+        return 1;
 
-          << "Where:\n"
-          << "\t[options]              Optional flags and parameters for compression.\n"
-          << "\t-i,  --in [in_file]    Specify the input file . If omitted, input is taken from standard input (stdin).\n"
-          << "\t-o,  --out [out_file]  Specify the output file (default: VCF). If omitted, output is sent to standard output (stdout).\n\n"
-
-          << "Options:\n\n"
-          << "    General Options:\n\n"
-          << "\t-M,  --mode_lossy\tChoose lossy compression mode (default: lossless).\n"
-          << "\t-b,  --bcf\t\tOutput a BCF file (default: VCF).\n\n"
-
-          << "    Filter options (applicable in lossy compression mode only): \n\n"
-          << "\t-r,  --range [X]\tSpecify range in format [start],[end] (e.g., -r 4999756,4999852).\n"
-          << "\t-s,  --samples [X]\tSamples separated by comms (e.g., -s HG03861,NA18639) OR '@' sign followed by the name of a file with sample name(s) separated by whitespaces (for exaple: -s @file_with_IDs.txt). By default all samples/individuals are decompressed. \n"
-          << "\t--header-only\t\tOutput only the header of the VCF/BCF.\n"
-          << "\t--no-header\t\tOutput without the VCF/BCF header (only genotypes).\n"
-          << "\t-G,  --no-genotype\tDon't output sample genotypes (only #CHROM, POS, ID, REF, ALT, QUAL, FILTER, and INFO columns).\n"
-          << "\t-C,  --out-ac-an\tWrite AC/AN to the INFO field.\n"
-          << "\t-S,  --split\t\tSplit output into multiple files (one per chromosome).\n"
-          << "\t-I, [ID=^]\t\tInclude only sites with specified ID (e.g., -I \"ID=rs6040355\").\n"
-          << "\t--minAC [X]\t\tInclude only sites with AC <= X.\n"
-          << "\t--maxAC [X]\t\tInclude only sites with AC >= X.\n"
-          << "\t--minAF [X]\t\tInclude only sites with AF >= X (X: 0 to 1).\n"
-          << "\t--maxAF [X]\t\tInclude only sites with AF <= X (X: 0 to 1).\n"
-          << "\t--min-qual [X]\t\tInclude only sites with QUAL >= X.\n"
-          << "\t--max-qual [X]\t\tInclude only sites with QUAL <= X.\n"
-          << std::endl;
-    exit(0);
-
+    return 0;
 }
 
-int main(){
-    
+int decompress_entry(argumentParser &parser)
+{
+
+    // bool result = true;
+    if (parser.params.out_type == file_type::BCF_File && parser.params.out_file_name == "")
+
+        return parser.usage_decompress();
+
+    Decompressor decompressor(parser.params); // Load settings and data
+
+    // decompressor.getChrom();              //Obtaining chromosome information.
+
+    if (!decompressor.DecompressProcess())
+        return 1;
+
     return 0;
 }

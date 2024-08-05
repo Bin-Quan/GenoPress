@@ -12,7 +12,6 @@
 
 #include <vector>
 #include <cstdint>
-namespace gsc{
 
 struct bsc_params_t {
     int block_size;
@@ -42,5 +41,3 @@ public:
 	bool Compress(const std::vector<uint8_t>& v_input, std::vector<uint8_t>& v_output);
 	static bool Decompress(std::vector<uint8_t>& v_input, std::vector<uint8_t>& v_output);
 };
-
-} // namespace gsc
