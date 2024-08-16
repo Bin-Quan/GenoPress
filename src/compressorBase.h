@@ -6,7 +6,7 @@
 3 vint codec (Integer variable byte encoding)
 */
 
-#include <stddef.h>  // why?
+#include <stddef.h>
 #include "libbsc.h"
 #include "defs.h"
 
@@ -41,3 +41,20 @@ public:
 	bool Compress(const std::vector<uint8_t>& v_input, std::vector<uint8_t>& v_output);
 	static bool Decompress(std::vector<uint8_t>& v_input, std::vector<uint8_t>& v_output);
 };
+
+namespace vint_code
+{
+    uint32_t ReadVint(std::vector<uint8_t>& buffer, size_t& pos);
+    
+    size_t WriteVint(uint32_t value, std::vector<uint8_t>& buffer);
+    
+    //编码
+    // 输入整数数组：arr  
+    //可变字节编码后返回的字节数组 std::vector<uint8_t>
+    std::vector<uint8_t> EncodeArray(const std::vector<uint32_t>& arr);
+
+    //解码
+    // 输入字节数组：buffer  
+    //可变字节解码后的返回的整数组 std::vector<uint32_t>
+    std::vector<uint32_t> DecodeArray(std::vector<uint8_t>& buffer);	
+}

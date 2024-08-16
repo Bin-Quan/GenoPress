@@ -1,7 +1,8 @@
 
 #include "compressorBase.h"
 
-namespace gsc{
-
-
-} // namespace gsc
+bool CBSCWrapper::InitLibrary(int _features)
+{
+    
+    return true;
+}
