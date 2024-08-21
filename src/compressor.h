@@ -6,6 +6,8 @@
 #include "fileHandler.h"
 #include "variant.h"
 #include "blockProcessing.h"
+#include "sdsl/bit_vectors.hpp"
+#include "bitOperations.h"
 
 #include <map>
 #include <thread>
@@ -17,6 +19,10 @@ class Compressor
 {
 private:
     GSCParams params;
+    uint64_t copy_no = 0;
+    uint64_t unique_no = 0;
+    uint32_t no_blocks = 0;
+    bool input_pos;
 
     // OpenForWriting function
     string fname;
@@ -62,7 +68,7 @@ private:
     vector<thread> block_process_thread;
 
     mutex mtx_gt_block;
-	condition_variable cv_gt_block;
+    condition_variable cv_gt_block;
     int cur_block_id = 0;
 
     inline void lock_gt_block_process(int &_block_id)
@@ -78,29 +84,78 @@ private:
         cv_gt_block.notify_all();
     }
 
-    uint32_t no_curr_chrom_block =  0;
+    uint32_t no_curr_chrom_block = 0;
     size_t toal_all_size = 0;
     int64_t prev_pos = 0;
-    fixed_field_block fixed_field_block_io,fixed_field_block_compress;
+    fixed_field_block fixed_field_block_io, fixed_field_block_compress;
     uint32_t cur_chunk_actual_pos = 0;
-    map<uint32_t,vector<uint8_t>> vint_last_perm;
+    map<uint32_t, vector<uint8_t>> vint_last_perm;
 
     vector<bool> all_zeros;
     vector<bool> all_copies;
     vector<uint32_t> comp_pos_copy;
 
+    uint64_t no_vec;
+    vector<pair<std::string, uint32_t>> where_chrom;
+    vector<int64_t> chunks_min_pos;
+
+    void compressReplicatedRow();
+    bool writeCompressFlie();
+
+	condition_variable cv_v_coder;
+    void lock_coder_compressor(SPackage& pck);
+    void unlock_coder_compressor(SPackage& pck);
+
+    void Encoder(vector<uint8_t>& v_data, vector<uint8_t>& v_tmp);
+
+    bool writeTempFlie(fixed_field_block &fixed_field_block_io);
+
+    sdsl::bit_vector zeros_only_bit_vector[2];
+    sdsl::bit_vector copy_bit_vector[2];
+    sdsl::bit_vector unique;
+    sdsl::rank_support_v5<> rank_unique;
+    uint32_t used_bits_cp;
+    CBitMemory bm_comp_copy_orgl_id;
+    char bits_used(unsigned int n);
+
+    uint64_t Meta_comp_size = 0;
 
 public:
-    Compressor()
-    {
-    }
 
-    Compressor(GSCParams &params)
+
+    Compressor(GSCParams &_params)
     {
+        params = _params;
+        // curr_vec_id = 0;
+        copy_no = 0;
+        unique_no = 0;
+        no_blocks = 0;
+        input_pos = true;
+        all_zeros.reserve(no_variants_in_buf);
+        all_copies.reserve(no_variants_in_buf);
+        comp_pos_copy.reserve(no_variants_in_buf);
+
+        chunks_min_pos.reserve(no_variants_in_buf);
     }
 
     ~Compressor()
     {
+        for (auto p : v_bsc_size)
+            if (p)
+                delete p;
+
+        for (auto p : v_bsc_data)
+            if (p)
+                delete p;
+
+        if (file_handle2)
+            delete file_handle2;
+        // if(fname)
+        //     free(fname);
+        if (temp_file1_fname)
+            free(temp_file1_fname);
+        // if(comp)
+        //     fclose(comp);
     }
 
     bool CompressProcess();

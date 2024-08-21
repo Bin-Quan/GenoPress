@@ -21,7 +21,7 @@ INC_FLAGS += -I$(SRC_DIR)
 
 # 库文件
 LDFLAGS := -L$(LIB_DIR) -Wl,-rpath,$(LIB_DIR)
-LDLIBS := -lhts -lbsc
+LDLIBS := -lhts -lbsc -lsdsl -lzstd -ldivsufsort -ldivsufsort64
 
 # 默认目标
 all: $(TARGET)

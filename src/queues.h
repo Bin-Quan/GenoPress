@@ -84,9 +84,43 @@ public:
         return true;
     }
 
+    bool Push(uint32_t id_block, DataType &data)
+    {
+        unique_lock<std::mutex> lck(m_mutex);
+        cv_push.wait(lck, [this]
+                     { return var_blocks.size() < capacity; });
+
+        var_blocks.emplace(variant_block_t(id_block, data));
+
+        cv_pop.notify_all();
+    }
+
+    void Complete()
+    {
+        unique_lock<std::mutex> lck(m_mutex);
+    
+        flag = true;
+        cv_pop.notify_all();    
+    }
+
 private:
+    typedef struct variant_block
+    {
+        uint32_t block_id;
+        DataType data;
+
+        variant_block(uint32_t _block_id,DataType &_data):
+        block_id(_block_id), data(_data)
+        {}
+    } variant_block_t;
+    
+    queue<variant_block_t> var_blocks;
+    
     bool flag;
     size_t capacity;
+    
+    mutex m_mutex;
+    condition_variable cv_pop, cv_push;
 };
 
 template <typename PartType>

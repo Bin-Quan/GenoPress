@@ -302,9 +302,69 @@ bool CompressionReader::GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_k
     return true;
 }
 
-void CompressionReader::GetOtherField(vector<key_desc> &_keys,uint32_t &_no_keys,int &_key_gt_id)
+void CompressionReader::GetOtherField(vector<key_desc> &_keys, uint32_t &_no_keys, int &_key_gt_id)
 {
     _keys = keys;
     _no_keys = no_keys;
     _key_gt_id = key_gt_id;
+}
+
+// 对VCF/BCF进行读取并进行处理,主要包括对其它字段, 固定字段和基因型的处理;以及在变体行中的子字段实际顺序的获取
+// setBitVector 设置基因型比特矩阵的相关参数
+// bcf_read1 htslib库中用于读取变体行的函数
+bool CompressionReader::ProcessInVCF()
+{
+}
+
+void CompressionReader::GetWhereChrom(vector<pair<std::string, uint32_t>> &_where_chrom, vector<int64_t> &_chunks_min_pos)
+{
+    _where_chrom = where_chrom;
+    _chunks_min_pos = chunks_min_pos;
+}
+
+vector<uint32_t> CompressionReader::GetActualVariants()
+{
+    return actual_variants;
+}
+
+// UpdateKeys 用于在获取实际子字段后更新对应的keys表
+void CompressionReader::UpdateKeys(vector<key_desc> &_keys)
+{
+    size_t k = 0;
+    if (order.size() < no_keys - no_flt_keys)
+    {
+        for (size_t i = 0; i < _keys.size(); i++)
+        {
+            if (_keys[i].keys_type == key_type_t::info)
+            {
+                auto it = std::find(order.begin(), order.end(), _keys[i].actual_field_id);
+                if (it != order.end())
+                {
+                    _keys[i].actual_field_id = order[k++];
+                }
+            }
+            else if (_keys[i].keys_type == key_type_t::fmt)
+            {
+                auto it = std::find(order.begin(), order.end(), _keys[i].actual_field_id);
+                if (it != order.end())
+                {
+                    _keys[i].actual_field_id = order[k++];
+                }
+            }
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < _keys.size(); i++)
+        {
+            if (_keys[i].keys_type == key_type_t::info)
+            {
+                _keys[i].actual_field_id = order[k++];
+            }
+            else if (_keys[i].keys_type == key_type_t::fmt)
+            {
+                _keys[i].actual_field_id = order[k++];
+            }
+        }
+    }
 }

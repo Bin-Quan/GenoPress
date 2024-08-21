@@ -52,6 +52,13 @@ private:
     vector<int> InfoIdToFieldId;
     vector<int> FormatIdToFieldId;
 
+    uint64_t no_vec;
+    vector<pair<std::string,uint32_t>> where_chrom;
+    vector<int64_t> chunks_min_pos;
+    vector<uint32_t> actual_variants;
+
+    vector<int> order;
+
 public:
     CompressionReader()
     {
@@ -97,5 +104,16 @@ public:
     void InitVarinats(File_Handle_2 *_file_handle2);
     
     void GetOtherField(vector<key_desc> &_keys,uint32_t &_no_keys,int &_key_gt_id);
+
+	bool ProcessInVCF();
+
+    uint64_t getNoVec()
+    {
+        return no_vec;
+    }
+
+    void GetWhereChrom(vector<pair<std::string, uint32_t>> &_where_chrom,vector<int64_t> &_chunks_min_pos);
+    vector<uint32_t> GetActualVariants();
+    void UpdateKeys(vector<key_desc> &_keys);
 
 };

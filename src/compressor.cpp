@@ -339,6 +339,61 @@ bool Compressor::CompressProcess()
             } }));
     }
 
+    if (!compression_reader->ProcessInVCF())
+        return false;
+
+    no_vec = compression_reader->getNoVec();
+
+    compression_reader->GetWhereChrom(where_chrom, chunks_min_pos);
+
+    if (params.compress_mode == compress_mode_t::lossless_mode)
+    {
+        for (uint32_t i = 0; i < params.no_threads; ++i)
+            part_compress_thread[i].join();
+
+        auto stream_id = file_handle2->RegisterStream("part2_params");
+
+        vector<uint8_t> v_desc;
+        vector<uint32_t> actual_variants = compression_reader->GetActualVariants();
+
+        compression_reader->UpdateKeys(keys);
+
+        append(v_desc, static_cast<uint32_t>(actual_variants.size()));
+        for (uint32_t i = 0; i < actual_variants.size(); ++i)
+        {
+            append(v_desc, actual_variants[i]);
+        }
+        append(v_desc, no_keys);
+        append(v_desc, key_gt_id);
+        for (uint32_t i = 0; i < no_keys; ++i)
+        {
+            append(v_desc, keys[i].key_id);
+            append(v_desc, keys[i].actual_field_id);
+            append(v_desc, static_cast<uint64_t>(keys[i].keys_type));
+            append(v_desc, keys[i].type);
+        }
+
+        vector<uint8_t> v_desc_compressed;
+        CBSCWrapper bsc;
+        bsc.InitCompress(p_bsc_fixed_fields);
+        bsc.Compress(v_desc, v_desc_compressed);
+
+        file_handle2->AddParamsPart(stream_id, v_desc_compressed);
+        file_handle2->Close();
+    }
+
+    for (uint32_t i = 0; i < params.no_gt_threads; ++i)
+        block_process_thread[i].join();
+    compress_thread->join();
+
+    if (temp_file)
+        fclose(temp_file);
+    temp_file = fopen(temp_file1_fname, "rb");
+    std::cerr << "Complete and process the chunking." << std::endl;
+
+    compressReplicatedRow();
+    writeCompressFlie();
+
     return true;
 }
 
@@ -383,8 +438,442 @@ bool Compressor::check_coder_compressor(SPackage &pck)
 
 void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compressed, vector<uint8_t> &v_tmp)
 {
+    lock_coder_compressor(pck);
+    CBSCWrapper *cbsc_size = v_bsc_size[pck.key_id];
+
+    if (pck.v_data.size())
+    {
+        v_compressed.clear();
+
+        CBSCWrapper *cbsc = v_bsc_data[pck.key_id];
+        if (keys[pck.key_id].type != BCF_HT_INT)
+        {
+            cbsc->Compress(pck.v_data, v_compressed);
+        }
+        else
+        {
+            Encoder(pck.v_data, v_tmp); // 重新排列
+            cbsc->Compress(v_tmp, v_compressed);
+        }
+
+        file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
+    }
+    else
+    {
+        v_compressed.clear();
+        file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
+    }
+
+    v_compressed.clear();
+    v_tmp.resize(pck.v_size.size() * 4); // 4字节的内容
+
+    copy_n((uint8_t *)pck.v_size.data(), v_tmp.size(), v_tmp.data());
+    cbsc_size->Compress(v_tmp, v_compressed);
+    file_handle2->AddPartComplete(pck.stream_id_size, pck.part_id, v_compressed);
+
+    unlock_coder_compressor(pck);
 }
 
 bool Compressor::compressFixedFields(fixed_field_block &fixed_field_block_io)
 {
+    fixed_field_block_compress.no_variants = fixed_field_block_io.no_variants;
+    for (auto data : {
+             make_tuple(ref(fixed_field_block_io.chrom), ref(fixed_field_block_compress.chrom), "chrom"),
+             make_tuple(ref(fixed_field_block_io.id), ref(fixed_field_block_compress.id), "id"),
+             make_tuple(ref(fixed_field_block_io.alt), ref(fixed_field_block_compress.alt), "alt"),
+             make_tuple(ref(fixed_field_block_io.qual), ref(fixed_field_block_compress.qual), "qual"),
+             make_tuple(ref(fixed_field_block_io.pos), ref(fixed_field_block_compress.pos), "pos"),
+             make_tuple(ref(fixed_field_block_io.ref), ref(fixed_field_block_compress.ref), "ref"),
+             // make_tuple(ref(fixed_field_block_io.gt_block), ref(fixed_field_block_compress.gt_block), "GT"),
+         })
+    {
+        CBSCWrapper cbsc;
+        cbsc.InitCompress(p_bsc_fixed_fields);
+        cbsc.Compress(get<0>(data), get<1>(data));
+    }
+
+    if (fixed_field_block_io.gt_block.size() < (2 << 20)) // 2MB
+    {
+        CBSCWrapper cbsc;
+        cbsc.InitCompress(p_bsc_fixed_fields);
+        cbsc.Compress(fixed_field_block_io.gt_block, fixed_field_block_compress.gt_block);
+        fixed_field_block_compress.gt_block.emplace_back(0);
+    }
+    else
+    {
+        zstd::zstd_compress(fixed_field_block_io.gt_block, fixed_field_block_compress.gt_block);
+        // std::cerr<<fixed_field_block_compress.no_variants<<":"<<fixed_field_block_io.gt_block.size()<<":"<<fixed_field_block_compress.gt_block.size()<<endl;
+        fixed_field_block_compress.gt_block.emplace_back(1);
+    }
+    writeTempFlie(fixed_field_block_compress);
+    // comp_sort_block_queue.Push(fixed_field_block_id,fixed_field_block_compress);
+    fixed_field_block_compress.Clear();
+    return true;
+}
+
+void Compressor::compressReplicatedRow()
+{
+    zeros_only_bit_vector[0] = sdsl::bit_vector(no_vec / 2 + no_vec % 2, 0);
+    zeros_only_bit_vector[1] = sdsl::bit_vector(no_vec / 2 + no_vec % 2, 0);
+    copy_bit_vector[0] = sdsl::bit_vector(no_vec / 2 + no_vec % 2, 0);
+    copy_bit_vector[1] = sdsl::bit_vector(no_vec / 2 + no_vec % 2, 0);
+
+    unique = sdsl::bit_vector(no_vec, 0);
+
+    for (uint64_t i = 0; i < all_zeros.size(); i++) // 交错分配？
+    {
+        zeros_only_bit_vector[i % 2][i / 2] = all_zeros[i];
+        copy_bit_vector[i % 2][i / 2] = all_copies[i];
+    }
+    comp_pos_copy.shrink_to_fit();
+    copy_no = comp_pos_copy.size();
+
+    uint32_t n_copies = 0;
+
+    uint64_t i = 0, zeros_no = 0, uqq = 0;
+
+    for (i = 0; i < no_vec; i++)
+    {
+        if (zeros_only_bit_vector[i % 2][i / 2])
+        {
+            zeros_no++;
+            continue;
+        }
+        else if (!copy_bit_vector[i % 2][i / 2])
+        {
+            unique[i] = 1;
+            uqq++;
+        }
+        else
+            n_copies++;
+    }
+    rank_unique = sdsl::rank_support_v5<>(&unique); // 快速查询 unique 位向量中1的数量和位置
+
+    uint64_t curr_non_copy_vec_id = 0;
+    uint64_t copy_id = 0, origin_unique_id;
+    uint32_t max_diff_copy = 0;
+
+    for (uint64_t i = 0; i < no_vec; i++)
+    {
+        if (zeros_only_bit_vector[i % 2][i / 2])
+            continue;
+        if (!copy_bit_vector[i % 2][i / 2])
+        {
+            curr_non_copy_vec_id++;
+
+            continue;
+        }
+        // Here curr_non_copy_vec_id is a fake curr_non_copy_vec_id (it is ud of the next non_copy_vec_id)
+        origin_unique_id = rank_unique(comp_pos_copy[copy_id]);
+
+        // Store difference -1, to not waste one value
+        comp_pos_copy[copy_id] = curr_non_copy_vec_id - origin_unique_id - 1;
+
+        if (comp_pos_copy[copy_id] > max_diff_copy)
+        {
+            max_diff_copy = comp_pos_copy[copy_id];
+        }
+        copy_id++;
+    }
+    used_bits_cp = bits_used(max_diff_copy);
+    bm_comp_copy_orgl_id.Create(copy_no * 4);
+
+    for (i = 0; i < copy_no; i++)
+    {
+        // std::cerr<<comp_pos_copy[i]<<endl;
+        bm_comp_copy_orgl_id.PutBits(comp_pos_copy[i], (int32_t)used_bits_cp);
+    }
+    bm_comp_copy_orgl_id.FlushPartialWordBuffer();
+
+    sdsl::util::clear(rank_unique);
+}
+
+char Compressor::bits_used(unsigned int n)
+{
+    char bits = 0;
+    while (n)
+    {
+        n = n >> 1;
+        bits++;
+    }
+    return bits;
+}
+
+bool Compressor::writeCompressFlie()
+{
+    std::cerr << "The BSC algorithm was used to compress the genotype part" << endl;
+
+    uint32_t curr_no_blocks = 0;
+    uint32_t where_chrom_size = static_cast<uint32_t>(where_chrom.size());
+    uint32_t chunks_streams_size = static_cast<uint32_t>(chunks_streams.size());
+
+    for (auto cur_chunk : chunks_streams)
+    {
+        fwrite(&cur_chunk.second.cur_chunk_actual_pos, sizeof(uint32_t), 1, comp);
+        fwrite(&cur_chunk.second.offset, sizeof(size_t), 1, comp);
+    }
+    fwrite(&params.ploidy, sizeof(uint8_t), 1, comp);
+
+    fwrite(&params.vec_len, sizeof(params.vec_len), 1, comp);
+
+    fwrite(&no_vec, sizeof(no_vec), 1, comp);
+
+    fwrite(&copy_no, sizeof(copy_no), 1, comp);
+    fwrite(&used_bits_cp, sizeof(char), 1, comp);
+    fwrite(&bm_comp_copy_orgl_id.mem_buffer_pos, sizeof(int32_t), 1, comp);
+    fwrite(bm_comp_copy_orgl_id.mem_buffer, 1, bm_comp_copy_orgl_id.mem_buffer_pos, comp);
+    // fwrite(&no_blocks, sizeof(no_blocks), 1, comp);
+    // fwrite(&params.max_no_vec_in_block, sizeof(params.max_no_vec_in_block), 1, comp);
+    fwrite(&params.n_samples, sizeof(params.n_samples), 1, comp);
+
+    uint32_t chunks_min_pos_size = static_cast<uint32_t>(chunks_min_pos.size());
+    fwrite(&chunks_min_pos_size, sizeof(uint32_t), 1, comp);
+    fwrite(&chunks_min_pos[0], sizeof(int64_t), chunks_min_pos_size, comp);
+
+    fwrite(&where_chrom_size, sizeof(uint32_t), 1, comp);
+
+    for (const auto &elem : where_chrom)
+    {
+        size_t chrom_size = elem.first.size();
+        fwrite(&chrom_size, sizeof(size_t), 1, comp);
+        fwrite(elem.first.data(), sizeof(char), chrom_size, comp);
+        fwrite(&elem.second, sizeof(int), 1, comp);
+    }
+    uint32_t vint_last_perm_size = static_cast<uint32_t>(vint_last_perm.size());
+    fwrite(&vint_last_perm_size, sizeof(uint32_t), 1, comp);
+    for (const auto &data : vint_last_perm)
+    {
+
+        fwrite(&data.first, sizeof(uint32_t), 1, comp);
+        uint32_t data_size = static_cast<uint32_t>(data.second.size());
+        fwrite(&data_size, sizeof(uint32_t), 1, comp);
+        fwrite(data.second.data(), sizeof(uint8_t), data_size, comp);
+    }
+
+    bm_comp_copy_orgl_id.Close();
+    Meta_comp_size += comp_v_header.size();
+    uint32_t comp_size = static_cast<uint32_t>(comp_v_header.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, comp);
+    fwrite(comp_v_header.data(), 1, comp_v_header.size(), comp);
+
+    Meta_comp_size += comp_v_samples.size();
+    comp_size = static_cast<uint32_t>(comp_v_samples.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, comp);
+    fwrite(comp_v_samples.data(), 1, comp_v_samples.size(), comp);
+
+    uint64_t size;
+    uint8_t *temp_buffer = NULL;
+    while (fread(&size, sizeof(size), 1, temp_file) == 1)
+    {
+        chunks_streams[curr_no_blocks + 1].offset = ftell(comp);
+
+        temp_buffer = (uint8_t *)realloc(temp_buffer, size);
+        if (!temp_buffer)
+        {
+            perror("Memory allocation failed");
+            fclose(temp_file);
+            return 1;
+        }
+
+        if (fread(temp_buffer, 1, size, temp_file) != size)
+        {
+            perror("Error reading data block");
+            free(temp_buffer);
+            fclose(temp_file);
+            return 1;
+        }
+        fwrite(temp_buffer, 1, size, comp);
+        curr_no_blocks++;
+    }
+
+    free(temp_buffer);
+    fclose(temp_file);
+    if (remove(temp_file1_fname) != 0)
+    {
+        perror("Error deleting temp1 file");
+        return EXIT_FAILURE;
+    }
+    // remove(temp_file1_fname);
+    other_fields_offset = ftell(comp);
+
+    FILE *other_f = fopen(temp_file2_fname.c_str(), "rb");
+
+    if (other_f)
+    {
+
+        const size_t buffer_size = 1024;
+        char buffer[buffer_size];
+        size_t bytes_read;
+        while ((bytes_read = fread(buffer, 1, buffer_size, other_f)) > 0)
+        {
+            fwrite(buffer, 1, bytes_read, comp);
+        }
+        fclose(other_f);
+        other_f = nullptr;
+        if (remove(temp_file2_fname.c_str()) != 0)
+        {
+            perror("Error deleting temp2 file");
+            return EXIT_FAILURE;
+        }
+
+        mode_type = true;
+    }
+
+    sdsl_offset = ftell(comp);
+
+    // sdsl_offset = end_offset;
+    fseek(comp, 0, SEEK_SET);
+    fwrite(&mode_type, sizeof(mode_type), 1, comp);
+    fwrite(&other_fields_offset, sizeof(other_fields_offset), 1, comp);
+    fwrite(&sdsl_offset, sizeof(sdsl_offset), 1, comp);
+    std::cerr << int(mode_type) << " " << other_fields_offset << " " << sdsl_offset << endl;
+    fseek(comp, 21, SEEK_SET);
+    for (auto cur_chunk : chunks_streams)
+    {
+        fwrite(&cur_chunk.second.cur_chunk_actual_pos, sizeof(uint32_t), 1, comp);
+        fwrite(&cur_chunk.second.offset, sizeof(size_t), 1, comp);
+    }
+    fseek(comp, 0, SEEK_END);
+
+    if (comp && comp != stdout)
+    {
+        fclose(comp);
+        comp = nullptr;
+    }
+    if (is_stdout)
+    {
+
+        for (int v = 0; v < 2; v++)
+        {
+            sdsl::rrr_vector<> rrr_bit_vector(zeros_only_bit_vector[v]);
+            rrr_bit_vector.serialize(std::cout);
+            sdsl::util::clear(rrr_bit_vector);
+        }
+        for (int v = 0; v < 2; v++)
+        {
+            sdsl::rrr_vector<> rrr_bit_vector(copy_bit_vector[v]);
+            rrr_bit_vector.serialize(std::cout);
+            sdsl::util::clear(rrr_bit_vector);
+        }
+    }
+    else
+    {
+
+        sdsl::osfstream out(fname, std::ios::binary | std::ios::app);
+        if (!out)
+        {
+            if (sdsl::util::verbose)
+            {
+                std::cerr << "ERROR: store_to_file not successful for: " << fname << "" << std::endl;
+            }
+            exit(1);
+        }
+        sdsl::rrr_vector<> rrr_bit_vector[5];
+        for (int v = 0; v < 2; v++)
+        {
+            sdsl::rrr_vector<> rrr_bit_vector(zeros_only_bit_vector[v]);
+            rrr_bit_vector.serialize(out);
+            sdsl::util::clear(rrr_bit_vector);
+        }
+        for (int v = 0; v < 2; v++)
+        {
+            rrr_bit_vector[v] = sdsl::rrr_vector<>(copy_bit_vector[v]);
+            rrr_bit_vector[v].serialize(out);
+            sdsl::util::clear(rrr_bit_vector[v]);
+        }
+
+        out.close();
+    }
+
+    if (sdsl::util::verbose)
+    {
+        std::cerr << "INFO: store_to_file: " << fname << "" << std::endl;
+    }
+
+    return 0;
+}
+
+void Compressor::lock_coder_compressor(SPackage &pck)
+{
+    unique_lock<mutex> lck(mtx_v_coder);
+    cv_v_coder.wait(lck, [&, this]
+                    {
+		int sid = pck.key_id;
+
+		return (int) v_coder_part_ids[sid] == pck.part_id; });
+}
+
+void Compressor::unlock_coder_compressor(SPackage &pck)
+{
+    lock_guard<mutex> lck(mtx_v_coder);
+    int sid = pck.key_id;
+
+    ++v_coder_part_ids[sid];
+    cv_v_coder.notify_all();
+}
+
+void Compressor::Encoder(vector<uint8_t> &v_data, vector<uint8_t> &v_tmp)
+{
+    v_tmp.resize(v_data.size());
+
+    // 将 v_data 中的每4个连续字节重新排列，使得 v_tmp 中的每部分包含一个重新排列后的字节序列。
+    size_t size = v_data.size() / 4;
+    for (size_t i = 0; i < v_data.size() / 4; i++)
+    {
+        v_tmp[i] = v_data[i * 4];
+        v_tmp[i + size] = v_data[i * 4 + 1];
+        v_tmp[i + size * 2] = v_data[i * 4 + 2];
+        v_tmp[i + size * 3] = v_data[i * 4 + 3];
+    }
+
+    v_tmp.shrink_to_fit();
+}
+
+// 将固定字段和基因型压缩后的编码数据流写到临时文件中
+// fixed_field_block_io : 存放固定字段和基因型编码数据流
+bool Compressor::writeTempFlie(fixed_field_block &fixed_field_block_io)
+{
+    uint64_t offset = ftell(temp_file) + sizeof(uint64_t);
+
+    uint64_t start_offset = ftell(temp_file);
+    size_t comp_size = 0;
+    fwrite(&offset, sizeof(offset), 1, temp_file);
+
+    fwrite(&fixed_field_block_io.no_variants, sizeof(uint32_t), 1, temp_file);
+    comp_size = static_cast<uint32_t>(fixed_field_block_io.chrom.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
+    fwrite(fixed_field_block_io.chrom.data(), 1, fixed_field_block_io.chrom.size(), temp_file);
+
+    comp_size = static_cast<uint32_t>(fixed_field_block_io.pos.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
+    fwrite(fixed_field_block_io.pos.data(), 1, fixed_field_block_io.pos.size(), temp_file);
+
+    comp_size = static_cast<uint32_t>(fixed_field_block_io.id.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
+    fwrite(fixed_field_block_io.id.data(), 1, fixed_field_block_io.id.size(), temp_file);
+
+    comp_size = static_cast<uint32_t>(fixed_field_block_io.ref.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
+    fwrite(fixed_field_block_io.ref.data(), 1, fixed_field_block_io.ref.size(), temp_file);
+
+    comp_size = static_cast<uint32_t>(fixed_field_block_io.alt.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
+    fwrite(fixed_field_block_io.alt.data(), 1, fixed_field_block_io.alt.size(), temp_file);
+
+    comp_size = static_cast<uint32_t>(fixed_field_block_io.qual.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
+    fwrite(fixed_field_block_io.qual.data(), 1, fixed_field_block_io.qual.size(), temp_file);
+
+    comp_size = static_cast<uint32_t>(fixed_field_block_io.gt_block.size());
+    fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
+    fwrite(fixed_field_block_io.gt_block.data(), 1, fixed_field_block_io.gt_block.size(), temp_file);
+
+    offset = ftell(temp_file) - offset;
+
+    fseek(temp_file, start_offset, SEEK_SET);
+
+    fwrite(&offset, sizeof(offset), 1, temp_file);
+    fseek(temp_file, 0, SEEK_END);
+
+    return true;
 }

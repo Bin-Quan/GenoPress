@@ -9,9 +9,9 @@ using namespace std;
 //存放VCF文件的数据结构
 typedef struct variant_desc_tag {
     string chrom;
-    // uint64_t pos;
+    uint64_t pos;
     // string id;
-    // string ref;
+    string ref;
     // string alt;
     // string qual;
     // string filter;
@@ -70,13 +70,14 @@ typedef struct variant_desc_tag {
 //  gt_block: GT子字段编码后数据码流
 struct fixed_field_block
 {
-    // uint32_t no_variants;
-    // vector<uint8_t> chrom;
-    // vector<uint8_t> id;
-    // vector<uint8_t> alt;
-    // vector<uint8_t> qual;
-    // vector<uint8_t> pos;
-    // vector<uint8_t> ref;
+    uint32_t no_variants;
+    vector<uint8_t> chrom;
+    vector<uint8_t> id;
+    vector<uint8_t> alt;
+    vector<uint8_t> qual;
+    vector<uint8_t> pos;
+    vector<uint8_t> ref;
+    
     vector<uint8_t> gt_block;
 
     // fixed_field_block()
@@ -106,28 +107,28 @@ struct fixed_field_block
     //     ref.reserve(no_variants_in_buf);
     //     gt_block.reserve(no_variants_in_buf);
     // }
-    // void Clear()
-    // {
-    //     no_variants = 0;
-    //     chrom.clear();
-    //     id.clear();
-    //     alt.clear();
-    //     qual.clear();
-    //     pos.clear();
-    //     ref.clear();
-    //     gt_block.clear();
-    // }
+    void Clear()
+    {
+        no_variants = 0;
+        chrom.clear();
+        id.clear();
+        alt.clear();
+        qual.clear();
+        pos.clear();
+        ref.clear();
+        gt_block.clear();
+    }
 };
 
 struct SPackage
 {
     int key_id;
     int part_id;
-    // uint32_t stream_id_size;
-    // uint32_t stream_id_data;
+    uint32_t stream_id_size;
+    uint32_t stream_id_data;
 
-    // vector<uint32_t> v_size;
-    // vector<uint8_t> v_data;
+    vector<uint32_t> v_size;
+    vector<uint8_t> v_data;
     // int stream_id_src;
     // bool is_func;
     // SPackage()

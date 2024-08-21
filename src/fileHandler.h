@@ -61,5 +61,7 @@ public:
 
     int RegisterStream(string stream_name);
 
+    void AddParamsPart(int stream_id,vector<uint8_t> & v_data);
+	bool AddPartComplete(int stream_id, int part_id, vector<uint8_t>& v_data);
 
 };
